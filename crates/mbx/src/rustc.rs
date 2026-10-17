@@ -307,9 +307,9 @@ pub(crate) fn compile(
     // and Cargo may also retain such an artifact from an earlier build. The
     // consumer must stay private even when it compiles without incremental state.
     let private_inputs = links_private_artifact(&compilation);
-    let mut learned = if !verify
-        && (session::eager_incremental_requested() || (learned_enabled && private_inputs))
-    {
+    let eager =
+        !verify && (session::eager_incremental_requested() || (learned_enabled && private_inputs));
+    let mut learned = if eager {
         eager_incremental_plan(&compilation)
     } else {
         reuse_hot_workspace_plan(
@@ -319,9 +319,17 @@ pub(crate) fn compile(
             ChangedEnvironment::LookUp,
         )
     };
+    // A hot workspace crate still looks its current sources up before it
+    // compiles incrementally. Another checkout, or this one before the edit,
+    // may already have published exactly these inputs -- the same commit
+    // merged into several checkouts is the common case -- and restoring that
+    // result costs far less than any compilation. The key is the one a cold
+    // crate derives, so a hit is exactly as valid; the private state stays on
+    // disk for the next edit, and only a miss compiles into it.
+    let lookup_before_incremental = !eager && learned.engaged();
     let mut unshareable = false;
     if !private_inputs
-        && !learned.engaged()
+        && (!learned.engaged() || lookup_before_incremental)
         && outputs.dep_info.is_file()
         && let Ok((candidates, discovered)) =
             action_from_current_dep_info(&compilation, &outputs.dep_info)
@@ -373,6 +381,9 @@ pub(crate) fn compile(
                     return Ok(ExitCode::SUCCESS);
                 }
             }
+            // A hot crate that missed keeps the plan it already has: it
+            // compiles into its private state and publishes nothing.
+            Ok(None) if lookup_before_incremental => {}
             Ok(None) => {
                 // The fast plan already measured this unit for this compile.
                 if !learned.backstop_rejected {
@@ -390,7 +401,12 @@ pub(crate) fn compile(
         learned = plan_learned_without_action_key(&compilation, &outputs);
     }
     let mut prediction_missing = private_inputs;
-    if !private_inputs && !learned.engaged() && !action_lookup_attempted {
+    // A miss here leaves a hot crate's plan alone too: the plan carries its
+    // churn record, which `restore_prediction_payload` does not replace.
+    if !private_inputs
+        && (!learned.engaged() || lookup_before_incremental)
+        && !action_lookup_attempted
+    {
         match restore_predicted_result(
             &compilation,
             &outputs,
@@ -2200,8 +2216,8 @@ enum ChangedEnvironment {
     Edit,
 }
 
-/// Re-enter a workspace unit's established private state without rebuilding a
-/// shared action key first.
+/// Recognize a workspace unit with established private state from its churn
+/// record, before any shared action key is built.
 ///
 /// An intact dep-info file supplies the churn fingerprint without constructing
 /// a shared action. A missing target, settled sources, or a changed environment
@@ -2211,7 +2227,9 @@ enum ChangedEnvironment {
 /// when the lookup misses, or calls this again with
 /// [`ChangedEnvironment::Edit`] when no lookup could be made. Settled sources
 /// above a private artifact are the exception: no shared action can describe
-/// what they link, so the lookup would only ever miss.
+/// what they link, so the lookup would only ever miss. The plan this returns
+/// for edited sources still lets the caller look them up first, since another
+/// checkout may have published exactly those; it is what a miss compiles with.
 fn reuse_hot_workspace_plan(
     compilation: &Compilation<'_>,
     outputs: &RustcOutputs,
