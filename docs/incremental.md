@@ -25,8 +25,11 @@ compilation as `incremental`.
 
 The trigger is a source change. An unchanged crate in a fresh target or a new
 checkout still compiles and publishes normally when it misses the cache. Later
-edits to a known active workspace crate go directly to its private state,
-without a cache lookup.
+edits to a known active workspace crate are looked up first: when the shared
+cache already holds a result for exactly the crate's current sources, for
+example because another checkout built the same commit, mbx restores it and
+leaves the private state in place for the next edit. Only a miss compiles with
+private state.
 
 Dependents of a crate using private incremental state also keep private state,
 because their inputs contain an artifact other checkouts cannot share. They can

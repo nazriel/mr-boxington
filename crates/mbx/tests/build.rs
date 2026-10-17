@@ -2487,8 +2487,8 @@ fn editing_one_crate_takes_its_dependents_private_too() {
     );
     assert_eq!(
         stats["lookups"].as_u64(),
-        Some(0),
-        "neither crate can hit a shared action, so neither should look one up: {stats}"
+        Some(1),
+        "the edited crate looks its new sources up before compiling incrementally, but the crate linking its private artifact cannot hit, so only one lookup should be made: {stats}"
     );
 
     // Unchanged sources after a wiped target are not churn, above or below:
@@ -2520,6 +2520,146 @@ fn editing_one_crate_takes_its_dependents_private_too() {
     assert!(
         settled["stored_bytes"].as_u64().unwrap_or(0) > 0,
         "a settled cone should publish again: {settled}"
+    );
+}
+
+/// A hot crate's next edit usually misses, but not always: a build with
+/// learned incremental off, or another checkout, may already have published
+/// exactly the sources it has now, as when one commit is merged into several
+/// checkouts. It looks them up before compiling incrementally, restores that
+/// result, and the crate above it, linking a published artifact again,
+/// restores too. Its private state stays for the edit after.
+#[test]
+fn a_hot_crate_restores_a_published_result_for_its_current_sources() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_dependent_project(project.path());
+    let write_base = |revision: u32| {
+        std::fs::write(
+            project.path().join("base/src/lib.rs"),
+            format!("pub fn value() -> u32 {{ {revision} }}\n"),
+        )
+        .unwrap();
+    };
+
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    write_base(1);
+    let published = build_with(
+        project.path(),
+        store.path(),
+        &reports.path().join("published.json"),
+        &[("MBX_LEARNED_INCREMENTAL", "0")],
+    )
+    .0;
+    assert!(
+        published["stored_bytes"].as_u64().unwrap_or(0) > 0,
+        "with learned incremental off the edit should publish: {published}"
+    );
+    write_base(2);
+    let hot = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("hot.json"),
+    );
+    assert_eq!(
+        compiled_incrementally(&hot),
+        2,
+        "the edited crate and the crate linking it should be private now: {hot}"
+    );
+
+    // Back to the published sources: the crate is hot, and its sources are
+    // exactly what the store holds.
+    write_base(1);
+    let restored = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("restored.json"),
+    );
+    assert_eq!(
+        compiled_incrementally(&restored),
+        0,
+        "a hot crate whose sources were published should restore, not compile: {restored}"
+    );
+    assert_eq!(
+        count(&restored, "misses"),
+        0,
+        "neither crate should have compiled: {restored}"
+    );
+    assert!(
+        count(&restored, "hits") >= 2,
+        "both the hot crate and the crate above it should restore: {restored}"
+    );
+    assert!(
+        learned_sessions(store.path()) > 0,
+        "the restore should leave the private state in place: {restored}"
+    );
+
+    write_base(3);
+    let edited = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("edited.json"),
+    );
+    assert_eq!(
+        compiled_incrementally(&edited),
+        2,
+        "the next edit should compile incrementally again: {edited}"
+    );
+    assert_eq!(
+        edited["stored_bytes"].as_u64(),
+        Some(0),
+        "and stay out of the shared cache: {edited}"
+    );
+}
+
+/// The lookup a hot crate now makes changes nothing when it misses: the
+/// crate compiles into its private state, as it did without one, and
+/// publishes nothing.
+#[test]
+fn a_hot_crate_with_new_sources_still_compiles_incrementally_after_a_miss() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_project(project.path());
+
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("cold.json"),
+    );
+    edit_project(project.path(), 1);
+    build(
+        project.path(),
+        store.path(),
+        &reports.path().join("edit-1.json"),
+    );
+    edit_project(project.path(), 2);
+    let stats = build(
+        project.path(),
+        store.path(),
+        &reports.path().join("edit-2.json"),
+    );
+
+    assert_eq!(
+        stats["lookups"].as_u64(),
+        Some(1),
+        "the hot crate should look its new sources up first: {stats}"
+    );
+    assert_eq!(count(&stats, "hits"), 0, "nothing holds them: {stats}");
+    assert_eq!(
+        compiled_incrementally(&stats),
+        1,
+        "so it should compile incrementally: {stats}"
+    );
+    assert_eq!(
+        stats["stored_bytes"].as_u64(),
+        Some(0),
+        "and publish nothing: {stats}"
     );
 }
 
