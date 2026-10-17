@@ -138,10 +138,9 @@ mbx looked them up:
   counts as a miss.
 - A crate that depends on a crate with private state keeps private state too,
   and counts as not looked up.
-- A workspace crate you keep editing usually goes straight back to its private
-  state without a lookup. The short summary counts it only as `incremental`;
-  the full summary's [compiler time](#compiler-time) line and `mbx tui` list it
-  as `unconsulted`.
+- A workspace crate you keep editing is looked up before it goes back to its
+  private state, so a result for its current sources restores as a hit, and a
+  miss counts as a miss and as `incremental`.
 
 This outcome is separate from the `incremental` bypass category shown under
 [Bypass](#bypass), which reports Cargo incremental mode (`MBX_INCREMENTAL=1`).
