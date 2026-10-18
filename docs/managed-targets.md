@@ -490,9 +490,10 @@ to 50 GiB. The cache disk and a custom `target.root` volume are each measured
 against their own size.
 
 While a disk has less free space than that, collection runs as often as every
-five minutes instead of once per `gc.interval`. It does not wait for a build to
-finish: a compilation that misses the cache checks the disk when it is done
-and starts collection in the background. Collection frees the shortfall from
+minute instead of once per `gc.interval`. It does not wait for a build to
+finish: a build that starts on a short disk starts a due collection in the
+background before it compiles, and a compilation that misses the cache checks
+the disk when it is done and does the same. Collection frees the shortfall from
 private state and shared cache data regardless of the budgets:
 
 1. Learned incremental state and generated source trees, least recently used

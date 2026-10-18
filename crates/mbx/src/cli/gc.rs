@@ -30,7 +30,7 @@ const COLLECTOR_LOCK: &str = "gc/v1/collector.lock";
 /// `gc.min_free_size`. Several builds at once can fill a disk well inside the
 /// usual hour, and a sweep that finds nothing left to free costs a walk in a
 /// detached process, not time on a build.
-pub(super) const LOW_DISK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+pub(super) const LOW_DISK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A low-disk sweep may need several passes over one tier, because links and
 /// reflinks can make the physical space recovered smaller than the bytes
@@ -881,6 +881,35 @@ pub(crate) fn schedule_low_disk_sweep(
     if let Err(error) = spawn(config) {
         log::debug!("the low-disk collector could not be started: {error:#}");
     }
+}
+
+/// Start the low-disk collector as a build begins, if a disk is already short.
+///
+/// A build that begins on a full disk should not wait for its own compilations
+/// to finish, or for `gc.interval`, before space is freed. The check is two
+/// free-space probes and a read of the sweep stamp; a due sweep runs in a
+/// detached process while the build goes on, so the build's start adds no more
+/// than starting that process. Every failure is swallowed: the build is not
+/// the collector's to fail.
+pub(super) fn schedule_low_disk_sweep_at_start(config: &Config, retention: &RetentionSettings) {
+    schedule_low_disk_sweep_at_start_with(
+        config,
+        retention,
+        &crate::util::disk_space,
+        &spawn_collector,
+    );
+}
+
+pub(super) fn schedule_low_disk_sweep_at_start_with(
+    config: &Config,
+    retention: &RetentionSettings,
+    disk_space: &dyn Fn(&Path) -> Option<crate::util::DiskSpace>,
+    spawn: &dyn Fn(&Config) -> Result<()>,
+) {
+    let Some(min_free) = retention.min_free else {
+        return;
+    };
+    schedule_low_disk_sweep(config, min_free, disk_space, spawn);
 }
 
 pub(crate) fn spawn_collector(config: &Config) -> Result<()> {

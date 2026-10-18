@@ -268,6 +268,59 @@ fn a_short_disk_claims_a_detached_collector_without_running_one_here() {
 }
 
 #[test]
+fn a_build_starting_on_a_short_disk_starts_a_due_collector() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = super::cargo_tests::managed_target_config(directory.path());
+    config.target.views = false;
+    config.gc.interval = Duration::from_secs(3600);
+    let mut retention = RetentionSettings {
+        min_free: Some(crate::config::MinFree::Bytes(90)),
+        ..RetentionSettings::default()
+    };
+    let spawned = std::cell::Cell::new(0);
+    let short = |_path: &Path| {
+        Some(crate::util::DiskSpace {
+            total: 100,
+            available: 10,
+        })
+    };
+    let roomy = |_path: &Path| {
+        Some(crate::util::DiskSpace {
+            total: 100,
+            available: 95,
+        })
+    };
+    let spawn = |_config: &Config| {
+        spawned.set(spawned.get() + 1);
+        Ok(())
+    };
+
+    assert!(crate::store::claim_sweep(&config.store_dir(), Duration::ZERO).unwrap());
+    schedule_low_disk_sweep_at_start_with(&config, &retention, &roomy, &spawn);
+    assert_eq!(spawned.get(), 0, "a disk with room starts nothing");
+
+    retention.min_free = None;
+    schedule_low_disk_sweep_at_start_with(&config, &retention, &short, &spawn);
+    assert_eq!(spawned.get(), 0, "no minimum, no collector");
+
+    retention.min_free = Some(crate::config::MinFree::Bytes(90));
+    schedule_low_disk_sweep_at_start_with(&config, &retention, &short, &spawn);
+    assert_eq!(spawned.get(), 0, "a sweep a moment ago is not due again");
+
+    // The hour-long interval does not hold it back: a short disk is due as
+    // soon as the low-disk interval has passed since the last sweep.
+    let stamp = std::fs::OpenOptions::new()
+        .write(true)
+        .open(config.store_dir().join("gc/v1/last-sweep"))
+        .unwrap();
+    stamp
+        .set_modified(std::time::SystemTime::now() - LOW_DISK_INTERVAL - Duration::from_secs(1))
+        .unwrap();
+    schedule_low_disk_sweep_at_start_with(&config, &retention, &short, &spawn);
+    assert_eq!(spawned.get(), 1);
+}
+
+#[test]
 fn a_disk_with_room_does_not_start_a_collector() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = super::cargo_tests::managed_target_config(directory.path());
