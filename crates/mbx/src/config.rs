@@ -598,6 +598,8 @@ struct RawTarget {
     /// Checkouts whose managed targets are collected first when over budget.
     ///
     /// Entries, such as `.claude/worktrees`, are matched like `target.keep`.
+    /// Under a space or size budget they also go first among learned
+    /// incremental state, ahead of the other checkouts' state.
     #[usage(env = "MBX_TARGET_EVICT_FIRST", parse = "list_by_comma")]
     evict_first: Option<Vec<String>>,
 }

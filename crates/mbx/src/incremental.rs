@@ -120,11 +120,17 @@ pub(crate) fn workspaces(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(workspaces)
 }
 
-/// Collect deleted, expired, and least-recently-used checkout state.
+/// Collect deleted, expired, and over-budget checkout state.
+///
+/// Over budget, the state of the checkouts `precedence` evicts first goes
+/// before the rest, then the least recently used, and the state of checkouts
+/// it keeps goes last. Standing orders the state; it does not exempt it, since
+/// learned state is rebuilt by the next build.
 pub(crate) fn collect(
     root: &Path,
     max_bytes: Option<u64>,
     max_age: Option<Duration>,
+    precedence: &crate::target::Precedence,
     dry_run: bool,
 ) -> Result<PruneOutcome> {
     let now = now_secs();
@@ -155,6 +161,15 @@ pub(crate) fn collect(
     // Keep one recently used checkout. A budget smaller than the active edit
     // loop cannot be met sustainably by deleting it after every build.
     candidates.pop();
+    // Stable, so each standing stays oldest-first.
+    candidates.sort_by_cached_key(|&index| {
+        entries[index]
+            .workspace_root
+            .as_deref()
+            .map_or(crate::target::Standing::Normal, |root| {
+                precedence.standing(root)
+            })
+    });
     let mut planned = entries
         .iter()
         .enumerate()
@@ -249,6 +264,7 @@ struct Entry {
     key: String,
     directory: PathBuf,
     updated_secs: Option<u64>,
+    workspace_root: Option<PathBuf>,
     bytes: u64,
     live: Option<bool>,
 }
@@ -274,6 +290,7 @@ fn entries(root: &Path) -> Result<Vec<Entry>> {
                 .as_ref()
                 .map(|record| crate::store::checkout_is_live(&record.workspace_root)),
             updated_secs: record.as_ref().map(|record| record.updated_secs),
+            workspace_root: record.map(|record| record.workspace_root),
             directory,
         });
     }
@@ -431,6 +448,7 @@ fn tree_bytes(root: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::target::Precedence;
 
     #[test]
     fn a_lease_from_another_pid_namespace_does_not_block_a_session() {
@@ -505,7 +523,7 @@ mod tests {
 
         std::fs::remove_dir(&checkout).unwrap();
         assert!(!crate::store::checkout_is_live(&checkout));
-        let outcome = collect(cache.path(), None, None, false).unwrap();
+        let outcome = collect(cache.path(), None, None, &Precedence::default(), false).unwrap();
 
         assert_eq!(outcome.removed_directories, 1);
         assert!(outcome.removed_bytes > 0);
@@ -525,7 +543,7 @@ mod tests {
         assert!(!lock_dir(cache.path(), &key).exists());
 
         std::fs::remove_dir(&checkout).unwrap();
-        let outcome = collect(cache.path(), None, None, true).unwrap();
+        let outcome = collect(cache.path(), None, None, &Precedence::default(), true).unwrap();
 
         assert_eq!(outcome.removed_directories, 1);
         assert!(!lock_dir(cache.path(), &key).exists());
@@ -540,7 +558,14 @@ mod tests {
         let state = touch(cache.path(), &checkout).unwrap();
         std::fs::remove_dir(&checkout).unwrap();
 
-        let outcome = collect(cache.path(), Some(0), Some(Duration::ZERO), false).unwrap();
+        let outcome = collect(
+            cache.path(),
+            Some(0),
+            Some(Duration::ZERO),
+            &Precedence::default(),
+            false,
+        )
+        .unwrap();
         assert_eq!(outcome.removed_directories, 0);
         assert_eq!(outcome.skipped_active_directories, 1);
         assert_eq!(
@@ -563,7 +588,7 @@ mod tests {
         std::fs::write(second_state.directory.join("state"), vec![0; 32]).unwrap();
         drop(second_state.lease);
 
-        let outcome = collect(cache.path(), Some(1), None, false).unwrap();
+        let outcome = collect(cache.path(), Some(1), None, &Precedence::default(), false).unwrap();
         assert_eq!(outcome.removed_directories, 1);
         assert!(!first_state.directory.exists());
         assert!(second_state.directory.exists());
@@ -588,7 +613,14 @@ mod tests {
 
         let budget =
             tree_bytes(&active_state.directory).saturating_add(tree_bytes(&newest_state.directory));
-        let outcome = collect(cache.path(), Some(budget), None, false).unwrap();
+        let outcome = collect(
+            cache.path(),
+            Some(budget),
+            None,
+            &Precedence::default(),
+            false,
+        )
+        .unwrap();
 
         assert_eq!(outcome.removed_directories, 1);
         assert_eq!(outcome.skipped_active_directories, 1);
@@ -609,7 +641,7 @@ mod tests {
         assert_eq!(stats.directories, 1);
         assert_eq!(stats.untracked_directories, 1);
         assert_eq!(stats.bytes, 32);
-        let outcome = collect(cache.path(), Some(0), None, false).unwrap();
+        let outcome = collect(cache.path(), Some(0), None, &Precedence::default(), false).unwrap();
         assert_eq!(outcome.untracked_directories, 1);
         assert_eq!(outcome.remaining_bytes, 32);
         assert!(directory.exists());
@@ -632,5 +664,107 @@ mod tests {
         ));
         assert!(!selected_directory.exists());
         assert!(kept_state.directory.exists());
+    }
+
+    /// A checkout holding `bytes` of state, last used at `updated`.
+    fn aged_state(root: &Path, checkout: &Path, updated: u64, bytes: usize) -> PathBuf {
+        let state = touch(root, checkout).unwrap();
+        std::fs::write(state.directory.join("state"), vec![0; bytes]).unwrap();
+        let record = CheckoutRecord {
+            version: RECORD_VERSION,
+            workspace_root: checkout.to_path_buf(),
+            updated_secs: updated,
+        };
+        std::fs::write(
+            state.directory.join(RECORD_FILE),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        state.directory.clone()
+    }
+
+    #[test]
+    fn over_budget_takes_evict_first_state_before_older_state() {
+        let cache = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let main = work.path().join("app");
+        let agent = work.path().join("app/.worktrees/fix");
+        let other = work.path().join("other");
+        let newest = work.path().join("newest");
+        for checkout in [&main, &agent, &other, &newest] {
+            std::fs::create_dir_all(checkout).unwrap();
+        }
+        let main_state = aged_state(cache.path(), &main, 1, 32);
+        let other_state = aged_state(cache.path(), &other, 2, 32);
+        let agent_state = aged_state(cache.path(), &agent, 3, 32);
+        let newest_state = aged_state(cache.path(), &newest, 4, 32);
+        let precedence = Precedence {
+            evict_first: vec![PathBuf::from(".worktrees")],
+            ..Precedence::default()
+        };
+        let total = [&main_state, &other_state, &agent_state, &newest_state]
+            .into_iter()
+            .map(|state| tree_bytes(state))
+            .sum::<u64>();
+        let one_removal = total - tree_bytes(&agent_state);
+
+        let outcome = collect(cache.path(), Some(one_removal), None, &precedence, false).unwrap();
+
+        assert_eq!(outcome.removed_directories, 1);
+        assert!(!agent_state.exists(), "evict-first goes before older state");
+        assert!(main_state.exists() && other_state.exists() && newest_state.exists());
+
+        // Without a standing, the oldest goes instead.
+        std::fs::create_dir_all(&agent).unwrap();
+        let agent_state = aged_state(cache.path(), &agent, 3, 32);
+        collect(
+            cache.path(),
+            Some(one_removal),
+            None,
+            &Precedence::default(),
+            false,
+        )
+        .unwrap();
+        assert!(!main_state.exists());
+        assert!(agent_state.exists());
+    }
+
+    #[test]
+    fn kept_state_is_collected_last_and_the_most_recent_is_spared() {
+        let cache = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let kept = work.path().join("kept");
+        let human = work.path().join("human");
+        let agent = work.path().join("agent");
+        for checkout in [&kept, &human, &agent] {
+            std::fs::create_dir_all(checkout).unwrap();
+        }
+        let kept_state = aged_state(cache.path(), &kept, 1, 32);
+        let human_state = aged_state(cache.path(), &human, 2, 32);
+        let agent_state = aged_state(cache.path(), &agent, 3, 32);
+        let precedence = Precedence {
+            keep_exact: vec![kept.clone()],
+            evict_first: vec![agent.clone()],
+            ..Precedence::default()
+        };
+
+        // Everything it may take: the evict-first checkout is the most recent,
+        // so it is spared, and the kept state goes after the unmarked state.
+        let one_left = tree_bytes(&agent_state);
+        collect(cache.path(), Some(one_left), None, &precedence, false).unwrap();
+
+        assert!(agent_state.exists(), "the most recent state is spared");
+        assert!(!human_state.exists());
+        assert!(!kept_state.exists(), "a budget can still reach kept state");
+
+        // With room for one more, the unmarked state goes before the kept.
+        std::fs::create_dir_all(&human).unwrap();
+        std::fs::create_dir_all(&kept).unwrap();
+        let human_state = aged_state(cache.path(), &human, 2, 32);
+        let kept_state = aged_state(cache.path(), &kept, 1, 32);
+        let budget = tree_bytes(&kept_state) + tree_bytes(&agent_state);
+        collect(cache.path(), Some(budget), None, &precedence, false).unwrap();
+        assert!(!human_state.exists());
+        assert!(kept_state.exists());
     }
 }

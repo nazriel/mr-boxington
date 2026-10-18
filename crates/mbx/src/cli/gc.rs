@@ -90,6 +90,7 @@ pub(super) fn run(
         &config.cache_dir.join("incremental"),
         incremental_limit,
         retention.incremental_max_age,
+        &retention.target_precedence,
         dry_run,
     ) {
         Ok(outcome) => outcome,
@@ -929,6 +930,7 @@ pub(super) fn prune_targets(
         &config.cache_dir.join("incremental"),
         incremental_limit,
         retention.incremental_max_age,
+        &retention.target_precedence,
         false,
     );
     let mut accounting_complete = true;
@@ -1108,15 +1110,19 @@ fn collect_low_disk_incremental(
         return 0;
     };
     let limit = usage.saturating_sub(shortfall);
-    let outcome =
-        match crate::incremental::collect(&root, Some(limit), retention.incremental_max_age, false)
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                log::warn!("learned incremental state was not collected: {error}");
-                return 0;
-            }
-        };
+    let outcome = match crate::incremental::collect(
+        &root,
+        Some(limit),
+        retention.incremental_max_age,
+        &retention.target_precedence,
+        false,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            log::warn!("learned incremental state was not collected: {error}");
+            return 0;
+        }
+    };
     let freed = outcome.removed_bytes;
     collection.freed_target_bytes = collection.freed_target_bytes.saturating_add(freed);
     collection

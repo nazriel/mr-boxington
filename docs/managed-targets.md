@@ -429,6 +429,13 @@ The most recently used target directory is still spared, whichever list it is
 on. Kept targets count toward `target.max_size`, so the other checkouts' targets
 make room for them.
 
+The same order applies to learned incremental state when it is over its budget
+or the disk is short of space: the state of `target.evict_first` checkouts goes
+first, then the rest least recently used first, and the state of kept
+checkouts last. Unlike a kept target, kept incremental state is not exempt: it
+is rebuilt by the next build, and it can still be collected when that is what it
+takes to stay within budget. The most recently used checkout's state is spared.
+
 `mbx settings set` and the environment variables take comma-separated lists:
 
 ```sh
