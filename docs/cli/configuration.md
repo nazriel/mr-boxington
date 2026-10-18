@@ -177,7 +177,7 @@ Over budget, mbx collects the incremental state of inactive checkouts least rece
 
 Minimum interval between automatic sweeps while the disks have room.
 
-While a disk is short of `gc.min_free_size`, the interval is capped at five minutes, so sweeps can run that often even when this is longer.
+While a disk is short of `gc.min_free_size`, the interval is capped at one minute, so sweeps can run that often even when this is longer. A build that starts on a short disk also starts a due sweep before it compiles.
 
 ### `gc.max_size`
 
@@ -624,7 +624,7 @@ Detail of the build summary printed after a build.
 
 Checkouts whose managed targets are collected first when over budget.
 
-Entries, such as `.claude/worktrees`, are matched like `target.keep`.
+Entries, such as `.claude/worktrees`, are matched like `target.keep`. Under a space or size budget they also go first among learned incremental state, ahead of the other checkouts' state.
 
 ### `target.keep`
 
@@ -634,7 +634,17 @@ Entries, such as `.claude/worktrees`, are matched like `target.keep`.
 
 Checkouts whose managed targets are never collected for age or size.
 
-An absolute path covers the checkouts under it; a relative one matches wherever it appears in a checkout's path. A leading `~` is your home directory. When `target.evict_first` also matches a checkout, the entry that reaches deeper into its path wins, and a tie keeps it. A kept target is still collected once its checkout is deleted.
+An absolute path covers the checkouts under it; a relative one matches wherever it appears in a checkout's path. A leading `~` is your home directory. When `target.evict_first` also matches a checkout, the entry that reaches deeper into its path wins, and a tie keeps it. A kept target is still collected once its checkout is deleted. To keep one checkout and not those under it, use `target.keep_exact`.
+
+### `target.keep_exact`
+
+- **Type:** `option<list<string>>`
+- **Optional:** true
+- **Set with:** `MBX_TARGET_KEEP_EXACT`
+
+Checkouts whose managed targets are never collected, without the checkouts under them.
+
+Like `target.keep`, but each entry is an absolute path (a leading `~` is your home directory) and matches only the checkout at exactly that path. Use it to keep a repository's main checkout while the worktrees below it, such as `/work/app/.worktrees/feature`, stay collectable. A kept target is still collected once its checkout is deleted.
 
 ### `target.lanes`
 
