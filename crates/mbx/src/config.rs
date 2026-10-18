@@ -592,9 +592,20 @@ struct RawTarget {
     /// wherever it appears in a checkout's path. A leading `~` is your home
     /// directory. When `target.evict_first` also matches a checkout, the entry
     /// that reaches deeper into its path wins, and a tie keeps it. A kept
-    /// target is still collected once its checkout is deleted.
+    /// target is still collected once its checkout is deleted. To keep one
+    /// checkout and not those under it, use `target.keep_exact`.
     #[usage(env = "MBX_TARGET_KEEP", parse = "list_by_comma")]
     keep: Option<Vec<String>>,
+    /// Checkouts whose managed targets are never collected, without the
+    /// checkouts under them.
+    ///
+    /// Like `target.keep`, but each entry is an absolute path (a leading `~` is
+    /// your home directory) and matches only the checkout at exactly that path.
+    /// Use it to keep a repository's main checkout while the worktrees below it,
+    /// such as `/work/app/.worktrees/feature`, stay collectable. A kept target
+    /// is still collected once its checkout is deleted.
+    #[usage(env = "MBX_TARGET_KEEP_EXACT", parse = "list_by_comma")]
+    keep_exact: Option<Vec<String>>,
     /// Checkouts whose managed targets are collected first when over budget.
     ///
     /// Entries, such as `.claude/worktrees`, are matched like `target.keep`.
@@ -1359,6 +1370,9 @@ impl Config {
             target_precedence: crate::target::Precedence {
                 keep: checkout_patterns(raw.target.keep.as_deref(), dirs::home_dir())
                     .wrap_err(Invalid("target.keep"))?,
+                keep_exact: checkout_patterns(raw.target.keep_exact.as_deref(), dirs::home_dir())
+                    .and_then(require_absolute)
+                    .wrap_err(Invalid("target.keep_exact"))?,
                 evict_first: checkout_patterns(raw.target.evict_first.as_deref(), dirs::home_dir())
                     .wrap_err(Invalid("target.evict_first"))?,
             },
@@ -1812,6 +1826,18 @@ fn checkout_patterns(entries: Option<&[String]>, home: Option<PathBuf>) -> Resul
             })
         })
         .collect()
+}
+
+/// Entries that name one checkout must be absolute: a relative path matches
+/// wherever it appears, which is the opposite of exact.
+fn require_absolute(patterns: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    if let Some(relative) = patterns.iter().find(|pattern| !pattern.is_absolute()) {
+        eyre::bail!(
+            "{:?} is not an absolute path; an exact entry names one checkout",
+            relative.display().to_string()
+        );
+    }
+    Ok(patterns)
 }
 
 fn parse_optional_duration(value: &str) -> Result<Option<Duration>> {
@@ -2289,6 +2315,36 @@ mod tests {
             retention.target_precedence.evict_first,
             [PathBuf::from(".claude/worktrees"), PathBuf::from("scratch")]
         );
+    }
+
+    #[test]
+    fn exact_keep_entries_are_absolute_and_read_from_the_file_and_environment() {
+        let (_, retention) = configured_retention(
+            Some("[target]\nkeep_exact = [\"/work/app\", \"~/src/app\"]"),
+            &[],
+        )
+        .unwrap();
+        let home = dirs::home_dir().unwrap();
+        let home = std::fs::canonicalize(&home).unwrap_or(home);
+        assert_eq!(
+            retention.target_precedence.keep_exact,
+            [PathBuf::from("/work/app"), home.join("src/app")]
+        );
+        assert!(retention.target_precedence.keep.is_empty());
+
+        let (_, retention) =
+            configured_retention(None, &[("MBX_TARGET_KEEP_EXACT", "/work/app, /work/lib")])
+                .unwrap();
+        assert_eq!(
+            retention.target_precedence.keep_exact,
+            [PathBuf::from("/work/app"), PathBuf::from("/work/lib")]
+        );
+
+        let error =
+            configured_retention(None, &[("MBX_TARGET_KEEP_EXACT", ".worktrees")]).unwrap_err();
+        let error = format!("{error:#}");
+        assert!(error.contains("target.keep_exact"), "{error}");
+        assert!(error.contains("absolute"), "{error}");
     }
 
     #[test]

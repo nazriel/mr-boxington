@@ -74,15 +74,19 @@ struct ViewRecord {
 }
 
 /// Checkouts whose managed targets collection treats apart from the rest:
-/// `target.keep` and `target.evict_first`.
+/// `target.keep`, `target.keep_exact`, and `target.evict_first`.
 ///
 /// An absolute entry names a directory and matches the checkouts at or under
 /// it. A relative entry matches wherever its components appear together in a
 /// checkout's path, so `.claude/worktrees` covers every checkout under a
 /// `.claude/worktrees` directory in any repository.
+///
+/// An exact entry (`keep_exact`) is an absolute path that matches only the
+/// checkout at that path, not the checkouts under it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Precedence {
     pub keep: Vec<PathBuf>,
+    pub keep_exact: Vec<PathBuf>,
     pub evict_first: Vec<PathBuf>,
 }
 
@@ -99,7 +103,7 @@ pub(crate) enum Standing {
 
 impl Precedence {
     pub(crate) fn standing(&self, workspace_root: &Path) -> Standing {
-        if self.keep.is_empty() && self.evict_first.is_empty() {
+        if self.keep.is_empty() && self.keep_exact.is_empty() && self.evict_first.is_empty() {
             return Standing::Normal;
         }
         // Recorded as the build found it, which may be through a symlink the
@@ -112,7 +116,18 @@ impl Precedence {
                     .and_then(|resolved| deepest_match(entries, resolved)),
             )
         };
-        let keep = deepest(&self.keep);
+        let exact = |entries: &[PathBuf]| {
+            let reaches = |path: &Path| {
+                entries
+                    .iter()
+                    .any(|entry| entry == path)
+                    .then(|| path.components().count())
+            };
+            reaches(workspace_root)
+                .or_else(|| resolved.as_deref().and_then(reaches))
+                .map(|depth| (depth, depth))
+        };
+        let keep = deepest(&self.keep).max(exact(&self.keep_exact));
         let evict = deepest(&self.evict_first);
         // The entry that names more of the path is the more deliberate one:
         // keeping `~/src/app` does not keep an agent's worktree under
