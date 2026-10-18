@@ -767,4 +767,61 @@ mod tests {
         assert!(!human_state.exists());
         assert!(kept_state.exists());
     }
+
+    #[test]
+    fn plain_keep_also_sorts_last_and_an_active_evict_first_checkout_is_skipped() {
+        let cache = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let kept = work.path().join("kept");
+        let human = work.path().join("human");
+        let agent = work.path().join("agent");
+        let newest = work.path().join("newest");
+        for checkout in [&kept, &human, &agent, &newest] {
+            std::fs::create_dir_all(checkout).unwrap();
+        }
+        let kept_state = aged_state(cache.path(), &kept, 1, 32);
+        let human_state = aged_state(cache.path(), &human, 2, 32);
+        let agent_state = aged_state(cache.path(), &agent, 3, 32);
+        let newest_state = aged_state(cache.path(), &newest, 4, 32);
+        // A build is running in the evict-first checkout.
+        let lease = touch(cache.path(), &agent).unwrap();
+        // Touching refreshed the record; put it back among the older state.
+        let record = CheckoutRecord {
+            version: RECORD_VERSION,
+            workspace_root: agent.clone(),
+            updated_secs: 3,
+        };
+        std::fs::write(
+            lease.directory.join(RECORD_FILE),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        let precedence = Precedence {
+            keep: vec![work.path().join("kept")],
+            evict_first: vec![agent.clone()],
+            ..Precedence::default()
+        };
+        let total = [&kept_state, &human_state, &agent_state, &newest_state]
+            .into_iter()
+            .map(|state| tree_bytes(state))
+            .sum::<u64>();
+
+        // One removal is needed: the evict-first state is active, so the
+        // unmarked state goes, not the older kept state.
+        let outcome = collect(
+            cache.path(),
+            Some(total - tree_bytes(&human_state)),
+            None,
+            &precedence,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.skipped_active_directories, 1);
+        assert!(agent_state.exists(), "active state is never removed");
+        assert!(!human_state.exists());
+        assert!(kept_state.exists(), "plain keep is ordered last too");
+        assert!(newest_state.exists());
+        drop(lease);
+    }
 }
