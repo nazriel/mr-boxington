@@ -1,4 +1,4 @@
-use super::gc::{schedule_sweep, take_sweep_report};
+use super::gc::{schedule_low_disk_sweep_at_start, schedule_sweep, take_sweep_report};
 use crate::config::{CliSettings, Config, RetentionSettings, SummaryStyle};
 use crate::session::{self, CacheSession};
 use crate::{policy, target};
@@ -104,6 +104,9 @@ fn cargo_with_settings_bypass_log_and_roots(
         return run_cargo(&cargo, arguments, BTreeMap::new());
     }
     crate::storage::check_cache(config)?;
+    // Before the metadata probe and placement, so a sweep that is due starts
+    // freeing space while the build gets ready rather than after it.
+    schedule_low_disk_sweep_at_start(config, retention);
     let working_dir = std::env::current_dir()?;
     let mut roots = match roots {
         Some(roots) => roots,
