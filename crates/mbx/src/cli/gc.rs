@@ -30,7 +30,7 @@ const COLLECTOR_LOCK: &str = "gc/v1/collector.lock";
 /// `gc.min_free_size`. Several builds at once can fill a disk well inside the
 /// usual hour, and a sweep that finds nothing left to free costs a walk in a
 /// detached process, not time on a build.
-pub(super) const LOW_DISK_INTERVAL: Duration = Duration::from_secs(60);
+pub(super) const LOW_DISK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// A low-disk sweep may need several passes over one tier, because links and
 /// reflinks can make the physical space recovered smaller than the bytes
