@@ -315,6 +315,58 @@ fn a_build_starting_on_a_short_disk_starts_a_due_collector() {
 }
 
 #[test]
+fn the_build_start_sweep_follows_the_view_lease_and_precedes_placement() {
+    // The detached collector may reserve and delete a checkout's target until
+    // the build holds its lease on it, so the call must come after the lease
+    // and before anything is placed or compiled.
+    let source = include_str!("cargo.rs");
+    let position = |needle: &str| {
+        source
+            .find(needle)
+            .unwrap_or_else(|| panic!("cargo.rs no longer contains {needle:?}"))
+    };
+    let lease = position("target::ViewLease::acquire(&config.target.root, &roots.workspace_root)");
+    let call = position("schedule_low_disk_sweep_at_start(config, retention);");
+    let placement = position("let (placement, removed_target_bytes, adopted_target_bytes)");
+    assert!(
+        lease < call && call < placement,
+        "the build-start sweep must run after the view lease and before placement"
+    );
+    assert_eq!(
+        source.matches("schedule_low_disk_sweep_at_start(").count(),
+        1,
+        "and it is started once"
+    );
+}
+
+#[test]
+fn a_build_starting_with_gc_auto_off_starts_no_collector() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = super::cargo_tests::managed_target_config(directory.path());
+    config.target.views = false;
+    config.gc.auto = false;
+    let retention = RetentionSettings {
+        min_free: Some(crate::config::MinFree::Bytes(90)),
+        ..RetentionSettings::default()
+    };
+    let spawned = std::cell::Cell::new(0);
+    let short = |_path: &Path| {
+        Some(crate::util::DiskSpace {
+            total: 100,
+            available: 10,
+        })
+    };
+    let spawn = |_config: &Config| {
+        spawned.set(spawned.get() + 1);
+        Ok(())
+    };
+
+    schedule_low_disk_sweep_at_start_with(&config, &retention, &short, &spawn);
+
+    assert_eq!(spawned.get(), 0);
+}
+
+#[test]
 fn a_disk_with_room_does_not_start_a_collector() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = super::cargo_tests::managed_target_config(directory.path());

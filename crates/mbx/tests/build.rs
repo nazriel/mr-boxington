@@ -4753,6 +4753,107 @@ fn a_low_disk_floor_starts_collection_before_the_build_ends() {
     );
 }
 
+/// A compiler that waits for the sweep stamp before it compiles anything, and
+/// leaves a mark when the stamp was there. The shim's own low-disk check runs
+/// only after a compilation, so a stamp that exists by now was claimed by a
+/// collector the build started before compiling.
+#[cfg(unix)]
+fn stamp_waiting_compiler(project: &Path, attempts: u32) -> PathBuf {
+    let wrapper = project.join("stamp-waiting-rustc");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nn=0\nwhile [ ! -e \"$TEST_SWEEP_STAMP\" ] && [ \"$n\" -lt {attempts} ]; do sleep 0.02; n=$((n+1)); done\nif [ -e \"$TEST_SWEEP_STAMP\" ]; then : > \"$TEST_STAMP_SEEN\"; fi\nexec \"$TEST_REAL_RUSTC\" \"$@\"\n"
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&wrapper, permissions).unwrap();
+    wrapper
+}
+
+#[cfg(unix)]
+#[test]
+fn a_build_starting_on_a_short_disk_starts_the_collector_before_compiling() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_dependent_project(project.path());
+    let wrapper = stamp_waiting_compiler(project.path(), 1500);
+    let seen = project.path().join("stamp-seen");
+    let stamp = store.path().join("actions/gc/v1/last-sweep");
+    let real_rustc = which::which("rustc").unwrap();
+
+    let output = isolated_cargo_command(
+        mbx_command(),
+        project.path(),
+        store.path(),
+        &reports.path().join("build.json"),
+        &["check", "--offline"],
+        &[
+            ("MBX_GC_AUTO", "1"),
+            ("MBX_GC_MIN_FREE_SIZE", "1PiB"),
+            ("MBX_GC_INTERVAL", "1h"),
+            ("RUSTC", wrapper.to_str().unwrap()),
+            ("TEST_REAL_RUSTC", real_rustc.to_str().unwrap()),
+            ("TEST_SWEEP_STAMP", stamp.to_str().unwrap()),
+            ("TEST_STAMP_SEEN", seen.to_str().unwrap()),
+        ],
+    )
+    .output()
+    .expect("mbx should run");
+
+    assert!(
+        output.status.success(),
+        "the build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        seen.exists(),
+        "the collector had not been started when the first compiler ran"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_build_starting_on_a_short_disk_starts_no_collector_when_gc_auto_is_off() {
+    let store = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    write_dependent_project(project.path());
+    let wrapper = stamp_waiting_compiler(project.path(), 25);
+    let seen = project.path().join("stamp-seen");
+    let stamp = store.path().join("actions/gc/v1/last-sweep");
+    let real_rustc = which::which("rustc").unwrap();
+
+    let output = isolated_cargo_command(
+        mbx_command(),
+        project.path(),
+        store.path(),
+        &reports.path().join("build.json"),
+        &["check", "--offline"],
+        &[
+            ("MBX_GC_AUTO", "0"),
+            ("MBX_GC_MIN_FREE_SIZE", "1PiB"),
+            ("RUSTC", wrapper.to_str().unwrap()),
+            ("TEST_REAL_RUSTC", real_rustc.to_str().unwrap()),
+            ("TEST_SWEEP_STAMP", stamp.to_str().unwrap()),
+            ("TEST_STAMP_SEEN", seen.to_str().unwrap()),
+        ],
+    )
+    .output()
+    .expect("mbx should run");
+
+    assert!(
+        output.status.success(),
+        "the build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!seen.exists(), "gc.auto = false must start no collector");
+    assert!(!stamp.exists(), "and claim no sweep");
+}
+
 /// Wait for the collector a build started to leave its report.
 ///
 /// The collector is detached from the build, so a test that wants to observe
