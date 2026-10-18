@@ -110,9 +110,6 @@ fn cargo_with_settings_bypass_log_and_roots(
         return run_cargo(&cargo, arguments, BTreeMap::new());
     }
     crate::storage::check_cache(config)?;
-    // Before the metadata probe and placement, so a sweep that is due starts
-    // freeing space while the build gets ready rather than after it.
-    schedule_low_disk_sweep_at_start(config, retention);
     let working_dir = std::env::current_dir()?;
     let mut roots = match roots {
         Some(roots) => roots,
@@ -264,6 +261,11 @@ fn cargo_with_settings_bypass_log_and_roots(
     } else {
         None
     };
+    // After the lease above and before anything compiles. A sweep that is due
+    // starts freeing space while the build gets ready, and the lease is what
+    // keeps that detached collector from reserving and deleting this
+    // checkout's target before the build has claimed it.
+    schedule_low_disk_sweep_at_start(config, retention);
     // Placed before the session starts, because the target directory is what
     // the shim maps out of its cache keys and it has to be the one cargo will
     // actually write to.
