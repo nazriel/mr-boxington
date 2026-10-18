@@ -419,10 +419,21 @@ your home directory) and matches only the checkout at exactly that path:
 mbx settings set target.keep_exact /work/app
 ```
 
+The path compared is the Cargo workspace root, the directory holding the
+workspace's `Cargo.toml`, as recorded for the checkout's target. For a
+repository whose workspace lives in a subdirectory, name that subdirectory.
+
 This keeps `/work/app` and not `/work/app/.worktrees/feature`, which is then
 collected like any other target. An exact entry also outranks `target.evict_first`
 for the checkout it names, so `/work/app/.worktrees/bisect` in `target.keep_exact`
 stays while its sibling worktrees are evicted first.
+
+`target.keep_exact` needs mbx 1.24.1-nazriel.2 or later. An older mbx, and
+upstream mbx, rejects a configuration file that sets it (`unknown setting
+target.keep_exact`), and every command exits with an error. The environment
+variable `MBX_TARGET_KEEP_EXACT` is silently ignored by those versions, so the
+checkout would become collectable. Upgrade every mbx that reads the
+configuration before switching to it.
 
 Evict-first targets are collected least recently used first, ahead of the rest.
 The most recently used target directory is still spared, whichever list it is

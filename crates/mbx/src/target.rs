@@ -1487,7 +1487,7 @@ fn collect_with(
             // budget cannot be met, and the user is the only one who can
             // decide whether to raise it or keep fewer checkouts.
             let kept = if entries.iter().any(|entry| entry.5 == Standing::Keep) {
-                " and those in target.keep are"
+                " and those in target.keep and target.keep_exact are"
             } else {
                 " is"
             };
