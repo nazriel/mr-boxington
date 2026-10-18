@@ -256,6 +256,7 @@ views = true
 max_size = "30GiB"       # default: 10% of the target disk
 max_age = "30d"          # default
 keep = ["~/src/app"]     # never collected for age or size
+keep_exact = ["/work/app"]  # same, for exactly this checkout and not those under it
 evict_first = [".claude/worktrees"]  # collected first when over budget
 
 [remote]

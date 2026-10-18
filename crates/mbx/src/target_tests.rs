@@ -1178,6 +1178,7 @@ fn precedence_matches_absolute_directories_and_relative_names() {
     let precedence = Precedence {
         keep: vec![PathBuf::from("/src/app")],
         evict_first: vec![PathBuf::from(".claude/worktrees")],
+        ..Precedence::default()
     };
 
     assert_eq!(precedence.standing(Path::new("/src/app")), Standing::Keep);
@@ -1218,6 +1219,7 @@ fn precedence_matches_absolute_directories_and_relative_names() {
     let tie = Precedence {
         keep: vec![PathBuf::from("worktrees")],
         evict_first: vec![PathBuf::from("worktrees")],
+        ..Precedence::default()
     };
     assert_eq!(
         tie.standing(Path::new("/src/worktrees")),
@@ -1231,12 +1233,102 @@ fn precedence_matches_absolute_directories_and_relative_names() {
     let spelled_out = Precedence {
         keep: vec![PathBuf::from("worktrees")],
         evict_first: vec![PathBuf::from("/src/app/.claude/worktrees")],
+        ..Precedence::default()
     };
     assert_eq!(
         spelled_out.standing(Path::new("/src/app/.claude/worktrees")),
         Standing::EvictFirst,
         "ending at the same place, the entry naming more of the path wins"
     );
+}
+
+#[test]
+fn an_exact_keep_protects_one_checkout_and_not_the_ones_under_it() {
+    let precedence = Precedence {
+        keep_exact: vec![PathBuf::from("/work/app")],
+        ..Precedence::default()
+    };
+
+    assert_eq!(precedence.standing(Path::new("/work/app")), Standing::Keep);
+    assert_eq!(
+        precedence.standing(Path::new("/work/app/.worktrees/feature")),
+        Standing::Normal,
+        "the checkouts under it are not covered"
+    );
+    assert_eq!(
+        precedence.standing(Path::new("/work/app/crates/cli")),
+        Standing::Normal
+    );
+    assert_eq!(
+        precedence.standing(Path::new("/work/application")),
+        Standing::Normal
+    );
+
+    let with_eviction = Precedence {
+        evict_first: vec![PathBuf::from(".worktrees")],
+        ..precedence.clone()
+    };
+    assert_eq!(
+        with_eviction.standing(Path::new("/work/app")),
+        Standing::Keep
+    );
+    assert_eq!(
+        with_eviction.standing(Path::new("/work/app/.worktrees/feature")),
+        Standing::EvictFirst
+    );
+
+    let pinned_worktree = Precedence {
+        keep_exact: vec![PathBuf::from("/work/app/.worktrees/bisect")],
+        ..with_eviction
+    };
+    assert_eq!(
+        pinned_worktree.standing(Path::new("/work/app/.worktrees/bisect")),
+        Standing::Keep,
+        "an exact entry also outranks eviction of its siblings"
+    );
+    assert_eq!(
+        pinned_worktree.standing(Path::new("/work/app/.worktrees/other")),
+        Standing::EvictFirst
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn an_exact_keep_matches_through_a_symlinked_checkout() {
+    let directory = tempfile::tempdir().unwrap();
+    let real = checkout(directory.path(), "real");
+    let link = directory.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let precedence = Precedence {
+        keep_exact: vec![std::fs::canonicalize(&real).unwrap()],
+        ..Precedence::default()
+    };
+
+    assert_eq!(precedence.standing(&link), Standing::Keep);
+}
+
+#[test]
+fn an_exact_keep_leaves_the_checkouts_under_it_to_the_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = test_config(directory.path(), true);
+    let [kept, agent, human, newest] = ranked_views(directory.path(), &config);
+    let nested = kept.0.join(".worktrees/feature");
+    std::fs::create_dir_all(&nested).unwrap();
+    let nested_view = place(&config, &nested, &nested.join("target"), false).unwrap();
+    std::fs::write(nested_view.join("artifact"), vec![0_u8; 10]).unwrap();
+    age_view(&config.target.root, &nested, 0);
+    let precedence = Precedence {
+        keep_exact: vec![kept.0.clone()],
+        ..Precedence::default()
+    };
+
+    let outcome = collect_by(&config.target.root, Some(0), None, &precedence, false).unwrap();
+
+    assert!(kept.1.exists(), "the pinned checkout stays");
+    assert!(!nested_view.exists(), "the worktree under it goes");
+    assert!(!agent.1.exists() && !human.1.exists());
+    assert!(newest.1.exists(), "the most recently used one is spared");
+    assert_eq!(outcome.removed_views, 3);
 }
 
 #[test]
@@ -1285,6 +1377,7 @@ fn over_budget_takes_evict_first_targets_before_older_ones_and_never_kept_ones()
     let precedence = Precedence {
         keep: vec![kept.0.clone()],
         evict_first: vec![agent.0.clone()],
+        ..Precedence::default()
     };
 
     // 31 bytes against 21: one 10-byte target has to go.
