@@ -177,7 +177,7 @@ Over budget, mbx collects the incremental state of inactive checkouts least rece
 
 Minimum interval between automatic sweeps while the disks have room.
 
-While a disk is short of `gc.min_free_size`, the interval is capped at one minute, so sweeps can run that often even when this is longer. A build that starts on a short disk also starts a due sweep before it compiles.
+While a disk is short of `gc.min_free_size`, the interval is capped at five minutes, so sweeps can run that often even when this is longer. A build that starts on a short disk also starts a due sweep before it compiles.
 
 ### `gc.max_size`
 
