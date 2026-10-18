@@ -438,6 +438,19 @@ When both lists match a checkout, the entry that names more of its path wins.
 With the example above, `~/src/app` is kept and its agent worktrees under
 `~/src/app/.claude/worktrees` are evicted first. A tie keeps.
 
+To keep one checkout and leave the checkouts under it collectable, list it in
+`target.keep_exact` instead. Each entry is an absolute path (a leading `~` is
+your home directory) and matches only the checkout at exactly that path:
+
+```sh
+mbx settings set target.keep_exact /work/app
+```
+
+This keeps `/work/app` and not `/work/app/.worktrees/feature`, which is then
+collected like any other target. An exact entry also outranks `target.evict_first`
+for the checkout it names, so `/work/app/.worktrees/bisect` in `target.keep_exact`
+stays while its sibling worktrees are evicted first.
+
 Evict-first targets are collected least recently used first, ahead of the rest.
 Kept targets count toward `target.max_size`, so the other checkouts' targets
 make room for them.
