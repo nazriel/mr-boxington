@@ -2315,7 +2315,10 @@ mod tests {
         let (_, retention) =
             configured_retention(None, &[("MBX_TARGET_KEEP_EXACT", entry.as_str())]).unwrap();
 
-        assert_eq!(retention.target_precedence.keep_exact, [real.clone()]);
+        assert_eq!(
+            retention.target_precedence.keep_exact,
+            std::slice::from_ref(&real)
+        );
         let exact = retention.target_precedence.standing(&real);
         assert_eq!(exact, crate::target::Standing::Keep);
         assert_eq!(
