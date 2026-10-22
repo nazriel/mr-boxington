@@ -105,6 +105,10 @@ be collected like other units.
 defaults to 5% of the cache disk, between 10 GiB and 100 GiB.
 `gc.incremental_max_age` defaults to 30 days. Collection removes expired units
 first, then remaining units least recently used first until the budget is met.
+Within that order, the units of checkouts matched by `target.evict_first` go
+before the rest, and the units of checkouts matched by `target.keep` or
+`target.keep_exact` go last, though a budget can still reach them. See
+[Keep or evict specific checkouts](/managed-targets#keep-or-evict-specific-checkouts).
 Shared hard-linked files count once across the whole sweep and in
 `mbx cache stats`. Removing one unit frees those bytes only after the last
 unit or bookkeeping reference in the incremental cache is removed. Counts
