@@ -106,6 +106,7 @@ pub(super) fn run(
         &config.cache_dir.join("incremental"),
         incremental_limit.map(|share| share.saturating_sub(generated.remaining_bytes)),
         retention.incremental_max_age,
+        &retention.target_precedence,
         dry_run,
         // A short disk takes the last hour's units too.
         low_disk.is_none(),
@@ -1099,6 +1100,7 @@ pub(super) fn prune_targets(
         &config.cache_dir.join("incremental"),
         incremental_limit.map(|share| share.saturating_sub(generated.remaining_bytes)),
         retention.incremental_max_age,
+        &retention.target_precedence,
         false,
         // A short disk takes the last hour's units too.
         low_disk.is_none(),
@@ -1283,6 +1285,7 @@ fn collect_low_disk_incremental(
         &root,
         Some(limit),
         retention.incremental_max_age,
+        &retention.target_precedence,
         false,
         false,
         retention.incremental_max_bytes,

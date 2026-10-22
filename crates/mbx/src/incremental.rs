@@ -1,6 +1,7 @@
 //! Persistent per-checkout state for learned incremental compilation.
 
 use crate::retired::{self, RetiredTree};
+use crate::target::{Precedence, Standing};
 use eyre::{Context, Result};
 use mbx_cache_core::CacheDigest;
 use serde::{Deserialize, Serialize};
@@ -273,7 +274,10 @@ pub(crate) fn workspaces(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(workspaces)
 }
 
-/// Collect expired units, then units in least-recently-used order.
+/// Collect expired units, then units in least-recently-used order, taking the
+/// units of the checkouts `precedence` evicts first before the rest and those of
+/// the checkouts it keeps last. Standing orders the units; it does not exempt
+/// them, since the next build learns them again.
 /// Deleted checkouts remain donors until their last unit is collected.
 ///
 /// A unit of a live checkout keeps its directory: only its finished rustc
@@ -287,6 +291,7 @@ pub(crate) fn collect(
     root: &Path,
     max_bytes: Option<u64>,
     max_age: Option<Duration>,
+    precedence: &Precedence,
     dry_run: bool,
     hot_floor: bool,
     backstop_budget: Option<u64>,
@@ -295,6 +300,7 @@ pub(crate) fn collect(
         root,
         max_bytes,
         max_age,
+        precedence,
         dry_run,
         hot_floor,
         backstop_budget,
@@ -302,10 +308,12 @@ pub(crate) fn collect(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_with_unlink(
     root: &Path,
     max_bytes: Option<u64>,
     max_age: Option<Duration>,
+    precedence: &Precedence,
     dry_run: bool,
     hot_floor: bool,
     backstop_budget: Option<u64>,
@@ -315,6 +323,7 @@ fn collect_with_unlink(
         root,
         max_bytes,
         max_age,
+        precedence,
         dry_run,
         hot_floor,
         backstop_budget,
@@ -330,10 +339,12 @@ struct CollectHooks<R, U> {
     unlink: U,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_with_retire_and_unlink(
     root: &Path,
     max_bytes: Option<u64>,
     max_age: Option<Duration>,
+    precedence: &Precedence,
     dry_run: bool,
     hot_floor: bool,
     backstop_budget: Option<u64>,
@@ -376,7 +387,23 @@ fn collect_with_retire_and_unlink(
         .filter(|(_, entry)| entry.workspace_root.is_some())
         .flat_map(|(index, entry)| entry.units.iter().map(move |unit| (index, unit)))
         .collect::<Vec<_>>();
-    units.sort_by_key(|(_, unit)| (!expired(unit), unit.last_used, &unit.directory));
+    let standings = entries
+        .iter()
+        .map(|entry| {
+            entry
+                .workspace_root
+                .as_deref()
+                .map_or(Standing::Normal, |root| precedence.standing(root))
+        })
+        .collect::<Vec<_>>();
+    units.sort_by_key(|(index, unit)| {
+        (
+            !expired(unit),
+            standings[*index],
+            unit.last_used,
+            &unit.directory,
+        )
+    });
     let satisfied =
         |unit: &Unit, bytes: u64| !expired(unit) && max_bytes.is_none_or(|budget| bytes <= budget);
     for (index, unit) in units {
@@ -1935,6 +1962,45 @@ pub(crate) fn tree_bytes(root: &Path) -> u64 {
 mod tests {
     use super::*;
 
+    fn collect(
+        root: &Path,
+        max_bytes: Option<u64>,
+        max_age: Option<Duration>,
+        dry_run: bool,
+        hot_floor: bool,
+        backstop_budget: Option<u64>,
+    ) -> Result<PruneOutcome> {
+        collect_by(
+            root,
+            max_bytes,
+            max_age,
+            &Precedence::default(),
+            dry_run,
+            hot_floor,
+            backstop_budget,
+        )
+    }
+
+    fn collect_by(
+        root: &Path,
+        max_bytes: Option<u64>,
+        max_age: Option<Duration>,
+        precedence: &Precedence,
+        dry_run: bool,
+        hot_floor: bool,
+        backstop_budget: Option<u64>,
+    ) -> Result<PruneOutcome> {
+        super::collect(
+            root,
+            max_bytes,
+            max_age,
+            precedence,
+            dry_run,
+            hot_floor,
+            backstop_budget,
+        )
+    }
+
     #[test]
     fn a_lease_from_another_pid_namespace_does_not_block_a_session() {
         // Isolate the old process-local counter, so the held name is exactly
@@ -2211,6 +2277,7 @@ mod tests {
             cache.path(),
             Some(0),
             None,
+            &Precedence::default(),
             false,
             false,
             None,
@@ -3273,6 +3340,7 @@ mod tests {
             cache.path(),
             Some(0),
             None,
+            &Precedence::default(),
             false,
             false,
             None,
@@ -3655,6 +3723,182 @@ mod tests {
             seed(&own, unit).unwrap(),
             Some(PathBuf::from("/work/donor"))
         );
+    }
+
+    /// A checkout directory under `parent`, with one 32-byte unit last used at
+    /// `used` and no active lease.
+    fn idle_checkout(
+        cache: &Path,
+        parent: &Path,
+        name: &str,
+        used: u64,
+    ) -> (PathBuf, PathBuf, Checkout) {
+        let workspace = parent.join(name);
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state = touch(cache, &workspace).unwrap();
+        let unit = unit(&state.directory, "unit", used);
+        (workspace, unit, state)
+    }
+
+    #[test]
+    fn over_budget_takes_evict_first_units_before_older_ones() {
+        let cache = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let (_, main, main_state) = idle_checkout(cache.path(), work.path(), "app", 1);
+        let (_, other, other_state) = idle_checkout(cache.path(), work.path(), "other", 2);
+        let (_, agent, agent_state) =
+            idle_checkout(cache.path(), work.path(), "app/.worktrees/fix", 3);
+        let (_, newest, newest_state) = idle_checkout(cache.path(), work.path(), "newest", 4);
+        drop((main_state, other_state, agent_state, newest_state));
+        let precedence = Precedence {
+            evict_first: vec![PathBuf::from(".worktrees")],
+            ..Precedence::default()
+        };
+        let before = stats(cache.path()).unwrap();
+
+        let outcome = collect_by(
+            cache.path(),
+            Some(before.bytes - 32),
+            None,
+            &precedence,
+            false,
+            true,
+            Some(before.bytes - 32),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.removed_units, 1);
+        assert!(!agent.exists(), "evict-first goes before older state");
+        assert!(main.exists() && other.exists() && newest.exists());
+
+        // Without a standing, the oldest goes instead.
+        let before = stats(cache.path()).unwrap();
+        let outcome = collect(
+            cache.path(),
+            Some(before.bytes - 32),
+            None,
+            false,
+            true,
+            Some(before.bytes - 32),
+        )
+        .unwrap();
+        assert_eq!(outcome.removed_units, 1);
+        assert!(!main.exists());
+        assert!(other.exists() && newest.exists());
+    }
+
+    #[test]
+    fn kept_units_go_last_but_a_budget_can_still_reach_them() {
+        let cache = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let (kept_root, kept, kept_state) = idle_checkout(cache.path(), work.path(), "kept", 1);
+        let (_, human, human_state) = idle_checkout(cache.path(), work.path(), "human", 2);
+        let (agent_root, agent, agent_state) = idle_checkout(cache.path(), work.path(), "agent", 3);
+        drop((kept_state, human_state, agent_state));
+        let precedence = Precedence {
+            keep_exact: vec![kept_root],
+            evict_first: vec![agent_root],
+            ..Precedence::default()
+        };
+
+        // Room for one unit: the evict-first one is the newest, and is
+        // collected first nonetheless, then the unmarked one, then the kept.
+        let before = stats(cache.path()).unwrap();
+        collect_by(
+            cache.path(),
+            Some(before.bytes - 32),
+            None,
+            &precedence,
+            false,
+            true,
+            Some(before.bytes - 32),
+        )
+        .unwrap();
+        assert!(!agent.exists());
+        assert!(human.exists() && kept.exists());
+
+        let before = stats(cache.path()).unwrap();
+        collect_by(
+            cache.path(),
+            Some(before.bytes - 32),
+            None,
+            &precedence,
+            false,
+            true,
+            Some(before.bytes - 32),
+        )
+        .unwrap();
+        assert!(!human.exists(), "unmarked state goes before kept state");
+        assert!(kept.exists());
+
+        collect_by(
+            cache.path(),
+            Some(0),
+            None,
+            &precedence,
+            false,
+            true,
+            Some(0),
+        )
+        .unwrap();
+        assert!(!kept.exists(), "a budget can still reach kept state");
+    }
+
+    #[test]
+    fn plain_keep_sorts_last_and_an_evict_first_unit_in_use_is_never_removed() {
+        let cache = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let (kept_root, kept, kept_state) = idle_checkout(cache.path(), work.path(), "kept", 1);
+        let (_, human, human_state) = idle_checkout(cache.path(), work.path(), "human", 2);
+        // A build is running in the evict-first checkout, which compiled just
+        // now.
+        let (agent_root, agent, _agent_lease) =
+            idle_checkout(cache.path(), work.path(), "agent", now_secs());
+        drop((kept_state, human_state));
+        let precedence = Precedence {
+            keep: vec![kept_root],
+            evict_first: vec![agent_root],
+            ..Precedence::default()
+        };
+        let before = stats(cache.path()).unwrap();
+
+        let outcome = collect_by(
+            cache.path(),
+            Some(before.bytes - 32),
+            None,
+            &precedence,
+            false,
+            true,
+            Some(before.bytes - 32),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.removed_units, 1);
+        assert_eq!(outcome.kept_hot_units, 1);
+        assert_eq!(outcome.removed_sessions, 0);
+        assert!(agent.exists(), "state in use this hour is kept");
+        assert!(!human.exists(), "the unmarked unit goes, not the kept one");
+        assert!(kept.exists());
+
+        // A short disk takes the hour's state too, but never a session a
+        // compiler may still be using; the budget then reaches the kept unit.
+        let before = stats(cache.path()).unwrap();
+        let outcome = collect_by(
+            cache.path(),
+            Some(before.bytes - 32),
+            None,
+            &precedence,
+            false,
+            false,
+            Some(before.bytes - 32),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.removed_sessions, 0);
+        assert_eq!(outcome.skipped_active_units, 1);
+        assert_eq!(outcome.removed_units, 1);
+        assert!(agent.exists(), "active state is never removed");
+        assert!(!kept.exists());
     }
 
     #[test]
