@@ -612,9 +612,12 @@ struct RawTarget {
     ///
     /// Like `target.keep`, but each entry is an absolute path (a leading `~` is
     /// your home directory) and matches only the checkout at exactly that path.
+    /// The path compared is the Cargo workspace root, the directory holding the
+    /// workspace's `Cargo.toml`, which is not always the git checkout's root.
     /// Use it to keep a repository's main checkout while the worktrees below it,
     /// such as `/work/app/.worktrees/feature`, stay collectable. A kept target
-    /// is still collected once its checkout is deleted.
+    /// is still collected once its checkout is deleted. Older mbx versions
+    /// refuse a configuration file that sets it.
     #[usage(env = "MBX_TARGET_KEEP_EXACT", parse = "list_by_comma")]
     keep_exact: Option<Vec<String>>,
     /// Checkouts whose managed targets are collected first when over budget.
@@ -2376,6 +2379,30 @@ mod tests {
         let error = format!("{error:#}");
         assert!(error.contains("target.keep_exact"), "{error}");
         assert!(error.contains("absolute"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_keep_entries_resolve_symlinks_and_ignore_a_trailing_slash() {
+        let directory = tempfile::tempdir().unwrap();
+        let real = std::fs::canonicalize(directory.path()).unwrap().join("app");
+        std::fs::create_dir(&real).unwrap();
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let entry = format!("{}/", link.display());
+        let (_, retention) =
+            configured_retention(None, &[("MBX_TARGET_KEEP_EXACT", entry.as_str())]).unwrap();
+
+        assert_eq!(retention.target_precedence.keep_exact, [real.clone()]);
+        let exact = retention.target_precedence.standing(&real);
+        assert_eq!(exact, crate::target::Standing::Keep);
+        assert_eq!(
+            retention
+                .target_precedence
+                .standing(&real.join(".worktrees/x")),
+            crate::target::Standing::Normal
+        );
     }
 
     #[test]
