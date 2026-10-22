@@ -137,6 +137,10 @@ real run keeps.
 defaults to 5% of the cache disk, between 10 GiB and 100 GiB.
 `gc.incremental_max_age` defaults to 30 days. Collection removes expired units
 first, then remaining units least recently used first until the budget is met.
+Within that order, the units of checkouts matched by `target.evict_first` go
+before the rest, and the units of checkouts matched by `target.keep` or
+`target.keep_exact` go last, though a budget can still reach them. See
+[Keep or evict specific checkouts](/managed-targets#keep-or-evict-specific-checkouts).
 Seeded copies have separate inodes and count separately toward this logical
 budget, even when filesystem clones share their data blocks.
 Shared hard-linked files count once across the whole sweep and in
