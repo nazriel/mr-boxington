@@ -2131,6 +2131,123 @@ fn check_incremental_seeding(remapped: &[(&str, &str)]) {
     }
 }
 
+/// A hot crate that started from another checkout's seeded state looks its
+/// current sources up as any hot crate does: seeding changes where the private
+/// state comes from, not the key the lookup derives. A published result for
+/// those sources restores, the seeded state stays for the next edit, and a
+/// miss compiles into it.
+#[test]
+fn a_seeded_hot_crate_still_restores_a_published_result() {
+    if !rustc_relocates_incremental_state() {
+        return;
+    }
+    const MARKER: &str = "seeded-from-first";
+    let store = tempfile::tempdir().unwrap();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let reports = tempfile::tempdir().unwrap();
+    let write_base = |project: &Path, revision: u32| {
+        std::fs::write(
+            project.join("base/src/lib.rs"),
+            format!("pub fn value() -> u32 {{ {revision} }}\n"),
+        )
+        .unwrap();
+    };
+    for project in [first.path(), second.path()] {
+        write_dependent_project(project);
+    }
+
+    build(
+        first.path(),
+        store.path(),
+        &reports.path().join("first.json"),
+    );
+    write_base(first.path(), 1);
+    let donor = build(
+        first.path(),
+        store.path(),
+        &reports.path().join("first-edit.json"),
+    );
+    assert!(compiled_incrementally(&donor) >= 1, "{donor}");
+    let first_state = incremental_checkout(store.path(), first.path());
+    let units = find_files(&first_state, |path| {
+        file_name_is(path, |name| name == "query-cache.bin")
+    });
+    assert!(!units.is_empty(), "the edit should leave rustc state");
+    for unit in &units {
+        std::fs::write(unit.ancestors().nth(3).unwrap().join(MARKER), b"").unwrap();
+    }
+    // The first checkout also publishes the sources the second will reach.
+    write_base(first.path(), 3);
+    let published = build_with(
+        first.path(),
+        store.path(),
+        &reports.path().join("first-published.json"),
+        &[("MBX_LEARNED_INCREMENTAL", "0")],
+    )
+    .0;
+    assert!(
+        published["stored_bytes"].as_u64().unwrap_or(0) > 0,
+        "with learned incremental off the edit should publish: {published}"
+    );
+
+    build(
+        second.path(),
+        store.path(),
+        &reports.path().join("second.json"),
+    );
+    write_base(second.path(), 2);
+    let seeded = build(
+        second.path(),
+        store.path(),
+        &reports.path().join("second-edit.json"),
+    );
+    assert!(compiled_incrementally(&seeded) >= 1, "{seeded}");
+    let second_state = incremental_checkout(store.path(), second.path());
+    let seeded_marks = || {
+        find_files(&second_state, |path| {
+            file_name_is(path, |name| name == MARKER)
+        })
+        .len()
+    };
+    assert!(
+        seeded_marks() > 0,
+        "the second checkout's first edit should start from the first one's state"
+    );
+
+    // The second checkout's crate is hot and seeded; the first checkout
+    // published exactly the sources it reaches now.
+    write_base(second.path(), 3);
+    let restored = build(
+        second.path(),
+        store.path(),
+        &reports.path().join("second-restored.json"),
+    );
+    assert_eq!(
+        compiled_incrementally(&restored),
+        0,
+        "a seeded hot crate whose sources were published should restore: {restored}"
+    );
+    assert_eq!(count(&restored, "misses"), 0, "{restored}");
+    assert!(count(&restored, "hits") >= 2, "{restored}");
+    assert!(
+        seeded_marks() > 0,
+        "the restore should leave the seeded state in place"
+    );
+
+    write_base(second.path(), 4);
+    let edited = build(
+        second.path(),
+        store.path(),
+        &reports.path().join("second-edited.json"),
+    );
+    assert!(
+        compiled_incrementally(&edited) >= 1,
+        "a miss should compile into the seeded state: {edited}"
+    );
+    assert_eq!(edited["stored_bytes"].as_u64(), Some(0), "{edited}");
+}
+
 #[test]
 fn learned_incremental_marked_history_survives_edits_and_seed_policy_changes() {
     if !rustc_relocates_incremental_state() {
