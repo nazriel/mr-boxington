@@ -1014,7 +1014,20 @@ fn config_arguments(arguments: &[String]) -> impl Iterator<Item = &str> {
     values.into_iter()
 }
 
+/// How deep `include` chains are followed before giving up and assuming the
+/// target directory may be set somewhere below.
+const MAX_INCLUDE_DEPTH: usize = 8;
+
 fn config_may_set_target(path: &Path) -> bool {
+    config_may_set_target_at(path, 0)
+}
+
+/// Whether a configuration file, or a file it includes, may set the target
+/// directory. Included files are read like the file itself, relative to it as
+/// Cargo resolves them, so a project whose `include` only adds `[patch]` or an
+/// optional file that is absent still gets a managed target. Anything this
+/// cannot read, parse or follow counts as a possible setting.
+fn config_may_set_target_at(path: &Path, depth: usize) -> bool {
     let contents = match std::fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
@@ -1023,11 +1036,54 @@ fn config_may_set_target(path: &Path) -> bool {
     let Ok(config) = toml::from_str::<toml::Value>(&contents) else {
         return true;
     };
-    config
+    if config
         .get("build")
         .and_then(|build| build.get("target-dir"))
         .is_some()
-        || config.get("include").is_some()
+    {
+        return true;
+    }
+    let Some(include) = config.get("include") else {
+        return false;
+    };
+    let Some(entries) = include_entries(include) else {
+        return true;
+    };
+    if depth >= MAX_INCLUDE_DEPTH {
+        return !entries.is_empty();
+    }
+    let base = path.parent().unwrap_or(Path::new(""));
+    entries.into_iter().any(|(included, optional)| {
+        let included = base.join(included);
+        match included.try_exists() {
+            Ok(true) => config_may_set_target_at(&included, depth + 1),
+            // Cargo skips a missing optional file and fails on any other.
+            Ok(false) => !optional,
+            Err(_) => true,
+        }
+    })
+}
+
+/// The files an `include` value names, each with whether it is optional, in
+/// the forms Cargo accepts: a path, or an array of paths and
+/// `{ path, optional }` tables. `None` for any other shape.
+fn include_entries(include: &toml::Value) -> Option<Vec<(PathBuf, bool)>> {
+    let entry = |value: &toml::Value| match value {
+        toml::Value::String(path) => Some((PathBuf::from(path), false)),
+        toml::Value::Table(table) => {
+            let path = table.get("path")?.as_str()?;
+            let optional = match table.get("optional") {
+                None => false,
+                Some(optional) => optional.as_bool()?,
+            };
+            Some((PathBuf::from(path), optional))
+        }
+        _ => None,
+    };
+    match include {
+        toml::Value::Array(values) => values.iter().map(entry).collect(),
+        value => entry(value).map(|entry| vec![entry]),
+    }
 }
 
 fn flag_value<'a>(arguments: &'a [String], flag: &str) -> Option<&'a str> {
@@ -1268,6 +1324,79 @@ mod tests {
 
         assert_eq!(resolved.target_dir, root.join("target"));
         assert!(resolved.target_dir_requested);
+    }
+
+    fn requested_with_project_config(files: &[(&str, &str)]) -> bool {
+        let directory = cargo_fixture();
+        let root = directory.path();
+        for (path, contents) in files {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        let resolved = resolve(
+            OsStr::new("cargo-that-does-not-exist"),
+            &["build".into()],
+            root,
+            None,
+        );
+        assert_eq!(resolved.target_dir, root.join("target"));
+        resolved.target_dir_requested
+    }
+
+    #[test]
+    fn project_config_include_of_a_missing_optional_file_leaves_the_target_unrequested() {
+        assert!(!requested_with_project_config(&[(
+            ".cargo/config.toml",
+            "include = [{ path = \"local.toml\", optional = true }]\n[net]\ngit-fetch-with-cli = true\n",
+        )]));
+    }
+
+    #[test]
+    fn project_config_include_without_a_target_directory_leaves_the_target_unrequested() {
+        assert!(!requested_with_project_config(&[
+            (
+                ".cargo/config.toml",
+                "include = [\"patches.toml\", { path = \"local.toml\", optional = true }]\n",
+            ),
+            (
+                ".cargo/patches.toml",
+                "[patch.crates-io]\nserde = { path = \"../serde\" }\n",
+            ),
+            (".cargo/local.toml", "include = \"deeper.toml\"\n"),
+            (".cargo/deeper.toml", "[net]\noffline = true\n"),
+        ]));
+    }
+
+    #[test]
+    fn project_config_include_that_sets_the_target_directory_is_explicit() {
+        assert!(requested_with_project_config(&[
+            (".cargo/config.toml", "include = \"local.toml\"\n"),
+            (".cargo/local.toml", "include = [\"deeper.toml\"]\n"),
+            (".cargo/deeper.toml", "[build]\ntarget-dir = \"target\"\n"),
+        ]));
+    }
+
+    #[test]
+    fn project_config_include_that_cannot_be_followed_is_explicit() {
+        // Cargo fails on a missing file that is not optional.
+        assert!(requested_with_project_config(&[(
+            ".cargo/config.toml",
+            "include = [\"missing.toml\"]\n",
+        )]));
+        assert!(requested_with_project_config(&[(
+            ".cargo/config.toml",
+            "include = 42\n",
+        )]));
+        assert!(requested_with_project_config(&[
+            (".cargo/config.toml", "include = \"broken.toml\"\n"),
+            (".cargo/broken.toml", "[build\n"),
+        ]));
+        // A cycle is cut off and counts as a possible setting.
+        assert!(requested_with_project_config(&[(
+            ".cargo/config.toml",
+            "include = \"config.toml\"\n",
+        )]));
     }
 
     #[test]
