@@ -607,8 +607,8 @@ struct RawTarget {
     /// checkout and not those under it, use `target.keep_exact`.
     #[usage(env = "MBX_TARGET_KEEP", parse = "list_by_comma")]
     keep: Option<Vec<String>>,
-    /// Checkouts whose managed targets are never collected, without the
-    /// checkouts under them.
+    /// Checkouts whose managed targets are never collected for age or size,
+    /// without the checkouts under them.
     ///
     /// Like `target.keep`, but each entry is an absolute path (a leading `~` is
     /// your home directory) and matches only the checkout at exactly that path.

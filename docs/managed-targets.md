@@ -469,10 +469,12 @@ make room for them.
 The same order applies to learned incremental state when it is over its budget
 or the disk is short of space: the units of `target.evict_first` checkouts go
 first, then the rest least recently used first, and the units of kept
-checkouts last. Expired units still go before any of them, and units in use are
-skipped. Unlike a kept target, kept incremental state is not exempt: the next
-build learns it again, and it can still be collected when that is what it takes
-to stay within budget.
+checkouts last. Expired units still go before any of them. A checkout a build
+is using loses only its finished rustc sessions, and its units used in the last
+hour are kept unless the disk is short; see
+[Where state lives](/incremental#where-state-lives). Unlike a kept target, kept
+incremental state is not exempt: the next build learns it again, and it can
+still be collected when that is what it takes to stay within budget.
 
 `mbx settings set` and the environment variables take comma-separated lists:
 

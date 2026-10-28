@@ -671,7 +671,7 @@ An absolute path covers the checkouts under it; a relative one matches wherever 
 - **Optional:** true
 - **Set with:** `MBX_TARGET_KEEP_EXACT`
 
-Checkouts whose managed targets are never collected, without the checkouts under them.
+Checkouts whose managed targets are never collected for age or size, without the checkouts under them.
 
 Like `target.keep`, but each entry is an absolute path (a leading `~` is your home directory) and matches only the checkout at exactly that path. The path compared is the Cargo workspace root, the directory holding the workspace's `Cargo.toml`, which is not always the git checkout's root. Use it to keep a repository's main checkout while the worktrees below it, such as `/work/app/.worktrees/feature`, stay collectable. A kept target is still collected once its checkout is deleted. Older mbx versions refuse a configuration file that sets it.
 
